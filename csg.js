@@ -6026,13 +6026,7 @@ for solid CAD anyway.
             if (!(toConnector1 instanceof CSG.Connector && toConnector2 instanceof CSG.Connector)) {
                 throw('could not parse CSG.Connector arguments toConnector1 or toConnector2');
             }
-            if (options.cag) {
-                if (options.cag.sides.length != this.sides.length) {
-                    throw('target cag needs same sides count as start cag');
-                }
-            }
-            // target cag is same as this unless specified
-            var toCag = options.cag || this;
+
             var m1 = thisConnector.getTransformationTo(toConnector1, false, 0);
             var m2 = thisConnector.getTransformationTo(toConnector2, false, 0);
 
