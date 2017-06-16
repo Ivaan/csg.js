@@ -5913,6 +5913,52 @@ for solid CAD anyway.
             return pairs;
         },
 
+        _toOrderedVector3DPoints: function(m) {
+
+            var floatToKey = function(f){
+                if(Math.abs(f) < CSG.EPS) return "0";
+                else return f.toFixed(5);
+            };
+
+            //order points by linking sides tip-to-tail
+            //This may be unneeded
+            var sidesByStartYByStartX = {}; //nested hash table mapping sides by y by x
+            //populate hash with all sides
+            this.sides.forEach(function(side){
+                var sx = floatToKey(side.vertex0.pos.x);
+                var sy = floatToKey(side.vertex0.pos.y);
+                sidesByStartYByStartX[sx] = sidesByStartYByStartX[sx] || {};
+                if(sidesByStartYByStartX[sx][sy]) throw('cag overlaps points at start');
+                sidesByStartYByStartX[sx][sy] = side;
+            });
+
+            //link sides with next
+            this.sides.forEach(function(side){
+                var ex = floatToKey(side.vertex1.pos.x);
+                var ey = floatToKey(side.vertex1.pos.y);
+                var next = sidesByStartYByStartX[ex][ey];
+                if(!next) throw('cag points disconected');
+                side.next = next;
+            });
+
+            //traverse the linked list
+            var firstSide = this.sides[0];
+            var side = firstSide;
+            var points = [];
+            do {
+                var p0 = side.vertex0.pos;
+                points.push(CSG.Vector3D.Create(p0.x, p0.y, 0))
+                side = side.next;
+            } while(side && side != firstSide);
+
+            if (typeof m != 'undefined') {
+                points = points.map(function(v) {
+                    return v.transform(m);
+                });
+            }
+            return points;
+        },
+
         /*
          * transform a cag into the polygons of a corresponding 3d plane, positioned per options
          * Accepts a connector for plane positioning, or optionally
@@ -5989,17 +6035,67 @@ for solid CAD anyway.
             var toCag = options.cag || this;
             var m1 = thisConnector.getTransformationTo(toConnector1, false, 0);
             var m2 = thisConnector.getTransformationTo(toConnector2, false, 0);
-            var vps1 = this._toVector3DPairs(m1);
-            var vps2 = toCag._toVector3DPairs(m2);
 
-            var polygons = [];
-            vps1.forEach(function(vp1, i) {
-                polygons.push(new CSG.Polygon([
-                    new CSG.Vertex(vps2[i][1]), new CSG.Vertex(vps2[i][0]), new CSG.Vertex(vp1[0])]));
-                polygons.push(new CSG.Polygon([
-                    new CSG.Vertex(vps2[i][1]), new CSG.Vertex(vp1[0]), new CSG.Vertex(vp1[1])]));
-            });
-            return polygons;
+            var toCag = options.cag || this;
+            // target cag is same as this unless specified
+
+            if (options.cag.sides.length == this.sides.length) {
+                var vps1 = this._toVector3DPairs(m1);
+                var vps2 = toCag._toVector3DPairs(m2);
+
+                var polygons = [];
+                vps1.forEach(function(vp1, i) {
+                    polygons.push(new CSG.Polygon([
+                        new CSG.Vertex(vps2[i][1]), new CSG.Vertex(vps2[i][0]), new CSG.Vertex(vp1[0])]));
+                    polygons.push(new CSG.Polygon([
+                        new CSG.Vertex(vps2[i][1]), new CSG.Vertex(vp1[0]), new CSG.Vertex(vp1[1])]));
+                });
+                return polygons;
+            }
+            else
+            {
+                //rather than throwing because there on not the same number of sides
+                //we attempt something clever
+                var ps1 = this._toOrderedVector3DPoints(m1);
+                var ps2 = toCag._toOrderedVector3DPoints(m2);
+
+                //allign start points
+                var p1Start = ps1[0];
+                var ps2ReStart = ps2.reduce(function(a, cv, ci){ var l = cv.distanceTo(p1Start); if(!a || l < a.l) a = {l:l, i:ci}; return a;}, null).i;
+
+                ps2 = ps2.slice(ps2ReStart).concat(ps2.slice(0, ps2ReStart));
+
+                //march through the points connecting the next of either ps1 or ps2 by which is closest to the last on the other
+                var i1 = 0;
+                var i2 = 0;
+                var l1 = ps1.length;
+                var l2 = ps2.length;
+                
+                var polygons = [];
+                while(i1 < l1 || i2 < l2){
+                    var p1 = ps1[i1%l1]; // point 1
+                    var p2 = ps2[i2%l2]; // point 2
+                    var np1 = ps1[(i1+1) % l1]; // next point 1
+                    var np2 = ps2[(i2+1) % l2]; // next point 2
+                    var np;
+
+                    if(i2 >= l2 || p2.distanceTo(np1) < p1.distanceTo(np2)) {
+                        //next ps1 point
+                        np = np1;
+                        ++i1;
+
+                    } else {
+                        //next ps2 point
+                        np = np2;
+                        ++i2;
+                    }
+                    polygons.push(new CSG.Polygon([
+                        new CSG.Vertex(p2), new CSG.Vertex(p1), new CSG.Vertex(np)
+                    ]));
+                }
+
+                return polygons;
+            }
         },
 
         union: function(cag) {
