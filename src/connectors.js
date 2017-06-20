@@ -215,4 +215,5 @@ ConnectorList.prototype = {
   }
 }
 
-module.exports = Connector
+module.exports = {Connector, ConnectorList}
+

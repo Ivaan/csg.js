@@ -128,6 +128,53 @@ CAG.prototype = {
     return pairs
   },
 
+_toOrderedVector3DPoints: function(m) {
+    const CSG = require('./CSG') // FIXME: circular dependencies CAG=>CSG=>CAG
+
+    var floatToKey = function(f){
+        if(Math.abs(f) < 0.000001) return "0";
+        else return f.toFixed(5);
+    };
+
+    //order points by linking sides tip-to-tail
+    //This may be unneeded
+    var sidesByStartYByStartX = {}; //nested hash table mapping sides by y by x
+    //populate hash with all sides
+    this.sides.forEach(function(side){
+      var sx = floatToKey(side.vertex0.pos.x);
+      var sy = floatToKey(side.vertex0.pos.y);
+      sidesByStartYByStartX[sx] = sidesByStartYByStartX[sx] || {};
+      if(sidesByStartYByStartX[sx][sy]) throw('cag overlaps points at start');
+      sidesByStartYByStartX[sx][sy] = side;
+    });
+
+    //link sides with next
+    this.sides.forEach(function(side){
+      var ex = floatToKey(side.vertex1.pos.x);
+      var ey = floatToKey(side.vertex1.pos.y);
+      var next = sidesByStartYByStartX[ex][ey];
+      if(!next) throw('cag points disconected');
+      side.next = next;
+    });
+
+    //traverse the linked list
+    var firstSide = this.sides[0];
+    var side = firstSide;
+    var points = [];
+    do {
+      var p0 = side.vertex0.pos;
+      points.push(CSG.Vector3D.Create(p0.x, p0.y, 0))
+      side = side.next;
+    } while(side && side != firstSide);
+
+    if (typeof m != 'undefined') {
+      points = points.map(function(v) {
+        return v.transform(m);
+      });
+    }
+    return points;
+},
+
     /*
      * transform a cag into the polygons of a corresponding 3d plane, positioned per options
      * Accepts a connector for plane positioning, or optionally
@@ -141,14 +188,14 @@ CAG.prototype = {
     let origin = [0, 0, 0]
     let defaultAxis = [0, 0, 1]
     let defaultNormal = [0, 1, 0]
-    let thisConnector = new Connector(origin, defaultAxis, defaultNormal)
+    let thisConnector = new CSG.Connector(origin, defaultAxis, defaultNormal)
     // translated connector per options
     let translation = options.translation || origin
     let axisVector = options.axisVector || defaultAxis
     let normalVector = options.normalVector || defaultNormal
     // will override above if options has toConnector
     let toConnector = options.toConnector ||
-            new Connector(translation, axisVector, normalVector)
+            new CSG.Connector(translation, axisVector, normalVector)
     // resulting transform
     let m = thisConnector.getTransformationTo(toConnector, false, 0)
     // create plane as a (partial non-closed) CSG in XY plane
@@ -188,37 +235,80 @@ CAG.prototype = {
         // arguments: options.toConnector1, options.toConnector2, options.cag
         //     walls go from toConnector1 to toConnector2
         //     optionally, target cag to point to - cag needs to have same number of sides as this!
+    const CSG = require('./CSG') // FIXME: circular dependencies CAG=>CSG=>CAG
     let origin = [0, 0, 0]
     let defaultAxis = [0, 0, 1]
     let defaultNormal = [0, 1, 0]
-    let thisConnector = new Connector(origin, defaultAxis, defaultNormal)
+    let thisConnector = new CSG.Connector(origin, defaultAxis, defaultNormal)
         // arguments:
     let toConnector1 = options.toConnector1
         // let toConnector2 = new Connector([0, 0, -30], defaultAxis, defaultNormal);
     let toConnector2 = options.toConnector2
-    if (!(toConnector1 instanceof Connector && toConnector2 instanceof Connector)) {
+    if (!(toConnector1 instanceof CSG.Connector && toConnector2 instanceof CSG.Connector)) {
       throw new Error('could not parse Connector arguments toConnector1 or toConnector2')
     }
-    if (options.cag) {
-      if (options.cag.sides.length !== this.sides.length) {
-        throw new Error('target cag needs same sides count as start cag')
-      }
-    }
-        // target cag is same as this unless specified
-    let toCag = options.cag || this
+
     let m1 = thisConnector.getTransformationTo(toConnector1, false, 0)
     let m2 = thisConnector.getTransformationTo(toConnector2, false, 0)
-    let vps1 = this._toVector3DPairs(m1)
-    let vps2 = toCag._toVector3DPairs(m2)
 
-    let polygons = []
-    vps1.forEach(function (vp1, i) {
-      polygons.push(new Polygon([
-        new Vertex3D(vps2[i][1]), new Vertex3D(vps2[i][0]), new Vertex3D(vp1[0])]))
-      polygons.push(new Polygon([
-        new Vertex3D(vps2[i][1]), new Vertex3D(vp1[0]), new Vertex3D(vp1[1])]))
-    })
-    return polygons
+    let toCag = options.cag || this
+    // target cag is same as this unless specified
+
+    if (options.cag.sides.length == this.sides.lentgh) {
+      let vps1 = this._toVector3DPairs(m1)
+      let vps2 = toCag._toVector3DPairs(m2)
+
+      let polygons = []
+      vps1.forEach(function (vp1, i) {
+        polygons.push(new Polygon([
+          new Vertex3D(vps2[i][1]), new Vertex3D(vps2[i][0]), new Vertex3D(vp1[0])]))
+        polygons.push(new Polygon([
+          new Vertex3D(vps2[i][1]), new Vertex3D(vp1[0]), new Vertex3D(vp1[1])]))
+      })
+      return polygons
+    } else {
+      //rather than throwing because there on not the same number of sides
+      //we attempt something clever
+      let ps1 = this._toOrderedVector3DPoints(m1);
+      let ps2 = toCag._toOrderedVector3DPoints(m2);
+
+      //allign start points
+      let p1Start = ps1[0];
+      let ps2ReStart = ps2.reduce(function(a, cv, ci){ let l = cv.distanceTo(p1Start); if(!a || l < a.l) a = {l:l, i:ci}; return a;}, null).i;
+
+      ps2 = ps2.slice(ps2ReStart).concat(ps2.slice(0, ps2ReStart));
+      //march through the points connecting the next of either ps1 or ps2 by which is closest to the last on the other
+      let i1 = 0;
+      let i2 = 0;
+      let l1 = ps1.length;
+      let l2 = ps2.length;
+      
+      let polygons = [];
+      while(i1 < l1 || i2 < l2){
+        let p1 = ps1[i1%l1]; // point 1
+        let p2 = ps2[i2%l2]; // point 2
+        let np1 = ps1[(i1+1) % l1]; // next point 1
+        let np2 = ps2[(i2+1) % l2]; // next point 2
+        let np;
+
+        if(i2 >= l2 || p2.distanceTo(np1) < p1.distanceTo(np2)) {
+          //next ps1 point
+          np = np1;
+          ++i1;
+        } else {
+          //next ps2 point
+          np = np2;
+          ++i2;
+        }
+        polygons.push(new CSG.Polygon([
+            new CSG.Vertex(p2), new CSG.Vertex(p1), new CSG.Vertex(np)
+        ]));
+      }
+
+      return polygons;
+
+
+    }
   },
 
     /**
@@ -522,9 +612,9 @@ CAG.prototype = {
       flipped: offsetVector.z < 0}))
         // walls
     for (let i = 0; i < twiststeps; i++) {
-      let c1 = new Connector(offsetVector.times(i / twiststeps), [0, 0, offsetVector.z],
+      let c1 = new CSG.Connector(offsetVector.times(i / twiststeps), [0, 0, offsetVector.z],
                 normalVector.rotateZ(i * twistangle / twiststeps))
-      let c2 = new Connector(offsetVector.times((i + 1) / twiststeps), [0, 0, offsetVector.z],
+      let c2 = new CSG.Connector(offsetVector.times((i + 1) / twiststeps), [0, 0, offsetVector.z],
                 normalVector.rotateZ((i + 1) * twistangle / twiststeps))
       polygons = polygons.concat(this._toWallPolygons({toConnector1: c1, toConnector2: c2}))
     }
@@ -550,11 +640,11 @@ CAG.prototype = {
     let normalV = [0, 0, 1]
     let polygons = []
         // planes only needed if alpha > 0
-    let connS = new Connector(origin, axisV, normalV)
+    let connS = new CSG.Connector(origin, axisV, normalV)
     if (alpha > 0 && alpha < 360) {
             // we need to rotate negative to satisfy wall function condition of
             // building in the direction of axis vector
-      let connE = new Connector(origin, axisV.rotateZ(-alpha), normalV)
+      let connE = new CSG.Connector(origin, axisV.rotateZ(-alpha), normalV)
       polygons = polygons.concat(
                 this._toPlanePolygons({toConnector: connS, flipped: true}))
       polygons = polygons.concat(
@@ -564,7 +654,7 @@ CAG.prototype = {
     let connT2
     let step = alpha / resolution
     for (let a = step; a <= alpha + EPS; a += step) { // FIXME Should this be angelEPS?
-      connT2 = new Connector(origin, axisV.rotateZ(-a), normalV)
+      connT2 = new CSG.Connector(origin, axisV.rotateZ(-a), normalV)
       polygons = polygons.concat(this._toWallPolygons(
                 {toConnector1: connT1, toConnector2: connT2}))
       connT1 = connT2
